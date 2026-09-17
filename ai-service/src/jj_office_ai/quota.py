@@ -16,6 +16,10 @@ class QuotaUnavailable(Exception):
     pass
 
 
+class QuotaExceeded(Exception):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class Reservation:
     reservation_id: str | None
@@ -42,9 +46,7 @@ class QuotaClient(Protocol):
         outcome: str,
     ) -> None: ...
 
-    async def release(
-        self, reservation: Reservation, *, request_id: str, reason: str
-    ) -> None: ...
+    async def release(self, reservation: Reservation, *, request_id: str, reason: str) -> None: ...
 
     async def close(self) -> None: ...
 
@@ -71,11 +73,21 @@ class HttpQuotaClient:
     reservations that remain open.
     """
 
-    def __init__(self, base_url: str, token: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        *,
+        timeout_seconds: float = 15.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.client = httpx.AsyncClient(
-            base_url=base_url,
+            # A trailing slash keeps CloudBase function prefixes such as
+            # /chat-router-server when endpoint paths are resolved.
+            base_url=f"{base_url.rstrip('/')}/",
             headers={"Authorization": f"Bearer {token}"},
-            timeout=httpx.Timeout(5.0, connect=3.0),
+            timeout=httpx.Timeout(timeout_seconds, connect=min(5.0, timeout_seconds)),
+            transport=transport,
         )
 
     async def reserve(
@@ -89,7 +101,7 @@ class HttpQuotaClient:
     ) -> Reservation:
         try:
             response = await self.client.post(
-                "/v1/internal/ai/reservations",
+                "v1/internal/ai/reservations",
                 json={
                     "request_id": request_id,
                     "user_id": user_id,
@@ -98,11 +110,20 @@ class HttpQuotaClient:
                     "request_bytes": request_bytes,
                 },
             )
+            if response.status_code == 402:
+                try:
+                    message = response.json().get("error", {}).get("message")
+                except ValueError:
+                    message = None
+                raise QuotaExceeded(message or "AI quota is exhausted")
             response.raise_for_status()
             reservation_id = response.json().get("reservation_id")
             if not isinstance(reservation_id, str) or not reservation_id:
                 raise ValueError("quota service returned no reservation_id")
             return Reservation(reservation_id)
+        except QuotaExceeded:
+            QUOTA_ERRORS.labels(operation="reserve_denied").inc()
+            raise
         except (httpx.HTTPError, ValueError) as exc:
             QUOTA_ERRORS.labels(operation="reserve").inc()
             logger.warning(
@@ -125,7 +146,7 @@ class HttpQuotaClient:
             return
         try:
             response = await self.client.post(
-                f"/v1/internal/ai/reservations/{reservation.reservation_id}/finalize",
+                f"v1/internal/ai/reservations/{reservation.reservation_id}/finalize",
                 json={
                     "request_id": request_id,
                     "model": model,
@@ -143,14 +164,12 @@ class HttpQuotaClient:
                 type(exc).__name__,
             )
 
-    async def release(
-        self, reservation: Reservation, *, request_id: str, reason: str
-    ) -> None:
+    async def release(self, reservation: Reservation, *, request_id: str, reason: str) -> None:
         if not reservation.reservation_id:
             return
         try:
             response = await self.client.post(
-                f"/v1/internal/ai/reservations/{reservation.reservation_id}/release",
+                f"v1/internal/ai/reservations/{reservation.reservation_id}/release",
                 json={"request_id": request_id, "reason": reason},
             )
             response.raise_for_status()
@@ -167,7 +186,18 @@ class HttpQuotaClient:
         await self.client.aclose()
 
 
-def create_quota_client(base_url: str, token: str) -> QuotaClient:
+def create_quota_client(
+    base_url: str,
+    token: str,
+    *,
+    timeout_seconds: float = 15.0,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> QuotaClient:
     if not base_url:
         return DisabledQuotaClient()
-    return HttpQuotaClient(base_url, token)
+    return HttpQuotaClient(
+        base_url,
+        token,
+        timeout_seconds=timeout_seconds,
+        transport=transport,
+    )

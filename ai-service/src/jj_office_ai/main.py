@@ -22,7 +22,7 @@ from .config import Settings, get_settings
 from .deepseek import DeepSeekClient, ProviderError, SSEUsageParser
 from .logging_config import configure_logging
 from .metrics import ACTIVE_REQUESTS, REQUEST_DURATION, REQUESTS, observe_tokens
-from .quota import QuotaUnavailable, Reservation, create_quota_client
+from .quota import QuotaExceeded, QuotaUnavailable, Reservation, create_quota_client
 from .rate_limit import RateLimitExceeded, RateLimitLease, create_rate_limiter
 from .schemas import ChatCompletionRequest, ErrorDetail, ErrorResponse, TokenUsage
 
@@ -69,8 +69,7 @@ def _max_output_tokens(body: ChatCompletionRequest, settings: Settings) -> int:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Requested output exceeds the service limit of "
-                f"{settings.max_output_tokens} tokens"
+                f"Requested output exceeds the service limit of {settings.max_output_tokens} tokens"
             ),
         )
     return requested
@@ -95,6 +94,8 @@ async def _reserve(
         )
     except QuotaUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except QuotaExceeded as exc:
+        raise HTTPException(status_code=402, detail=str(exc)) from exc
 
 
 def _response_headers(request_id: str) -> dict[str, str]:
@@ -109,6 +110,7 @@ def create_app(
     settings: Settings | None = None,
     *,
     upstream_transport: httpx.AsyncBaseTransport | None = None,
+    quota_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.log_level)
@@ -134,6 +136,8 @@ def create_app(
         application.state.quota = create_quota_client(
             resolved_settings.quota_service_url,
             resolved_settings.quota_service_token.get_secret_value(),
+            timeout_seconds=resolved_settings.quota_timeout_seconds,
+            transport=quota_transport,
         )
         logger.info(
             "service_started environment=%s auth_mode=%s models=%s quota=%s redis=%s",
@@ -362,9 +366,7 @@ def create_app(
                 parser.finish()
                 completed = True
                 outcome = "completed" if parser.usage.total_tokens else "completed_without_usage"
-                observe_tokens(
-                    model, parser.usage.prompt_tokens, parser.usage.completion_tokens
-                )
+                observe_tokens(model, parser.usage.prompt_tokens, parser.usage.completion_tokens)
                 await request.app.state.quota.finalize(
                     reservation,
                     request_id=request_id,

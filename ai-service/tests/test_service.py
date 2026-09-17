@@ -125,9 +125,7 @@ def test_streaming_request_preserves_sse_and_forces_usage() -> None:
 
 
 def test_static_auth_and_validation_errors_are_openai_shaped() -> None:
-    app = create_app(
-        settings(AI_AUTH_MODE="static", AI_STATIC_TOKENS="test-client-token")
-    )
+    app = create_app(settings(AI_AUTH_MODE="static", AI_STATIC_TOKENS="test-client-token"))
     with TestClient(app) as client:
         missing = client.get("/v1/models")
         wrong_model = client.post(
@@ -143,6 +141,111 @@ def test_static_auth_and_validation_errors_are_openai_shaped() -> None:
     assert missing.json()["error"]["message"] == "Missing bearer token"
     assert wrong_model.status_code == 400
     assert wrong_model.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_static_user_quota_reservation_and_settlement_contract() -> None:
+    quota_calls: list[dict[str, Any]] = []
+
+    async def quota_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        quota_calls.append(
+            {
+                "path": request.url.path,
+                "authorization": request.headers.get("authorization"),
+                "body": body,
+            }
+        )
+        if request.url.path.endswith("/finalize"):
+            return httpx.Response(200, json={"finalized": True, "charged_tokens": 11})
+        return httpx.Response(
+            200,
+            json={"reservation_id": "air_test_reservation_1234567890", "reserved_tokens": 520},
+        )
+
+    async def provider_handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "chat-test",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "AI服务连接成功"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11},
+            },
+        )
+
+    app = create_app(
+        settings(
+            AI_AUTH_MODE="static",
+            AI_STATIC_TOKENS="test-client-token",
+            AI_QUOTA_SERVICE_URL="https://quota.example/chat-router-server",
+            AI_QUOTA_SERVICE_TOKEN="internal-service-token",
+        ),
+        upstream_transport=httpx.MockTransport(provider_handler),
+        quota_transport=httpx.MockTransport(quota_handler),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer test-client-token",
+                "X-User-Id": "local-test-user",
+            },
+            json=completion(),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "AI服务连接成功"
+    assert [call["path"] for call in quota_calls] == [
+        "/chat-router-server/v1/internal/ai/reservations",
+        "/chat-router-server/v1/internal/ai/reservations/air_test_reservation_1234567890/finalize",
+    ]
+    assert all(call["authorization"] == "Bearer internal-service-token" for call in quota_calls)
+    assert quota_calls[0]["body"]["user_id"] == "local-test-user"
+    assert quota_calls[1]["body"]["usage"] == {
+        "prompt_tokens": 9,
+        "completion_tokens": 2,
+        "total_tokens": 11,
+    }
+
+
+def test_quota_exhaustion_is_returned_as_payment_required() -> None:
+    async def quota_handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            402,
+            json={"error": {"code": "QUOTA_EXCEEDED", "message": "AI 额度不足。"}},
+        )
+
+    async def provider_handler(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("provider must not be called when quota is exhausted")
+
+    app = create_app(
+        settings(
+            AI_AUTH_MODE="static",
+            AI_STATIC_TOKENS="test-client-token",
+            AI_QUOTA_SERVICE_URL="https://quota.example/chat-router-server",
+            AI_QUOTA_SERVICE_TOKEN="internal-service-token",
+        ),
+        upstream_transport=httpx.MockTransport(provider_handler),
+        quota_transport=httpx.MockTransport(quota_handler),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer test-client-token",
+                "X-User-Id": "local-test-user",
+            },
+            json=completion(),
+        )
+
+    assert response.status_code == 402
+    assert response.json()["error"]["message"] == "AI 额度不足。"
 
 
 def test_upstream_credentials_failure_is_not_exposed_as_user_auth_failure() -> None:
@@ -224,10 +327,14 @@ def test_production_requires_jwt_authentication() -> None:
 
 def test_jwt_authentication_validates_signature_issuer_and_audience() -> None:
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    public_pem = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode()
+    public_pem = (
+        private_key.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        .decode()
+    )
     token = jwt.encode(
         {
             "sub": "wechat-user-1",
@@ -239,17 +346,11 @@ def test_jwt_authentication_validates_signature_issuer_and_audience() -> None:
         private_key,
         algorithm="RS256",
     )
-    app = create_app(
-        settings(AI_AUTH_MODE="jwt", AI_JWT_PUBLIC_KEY_PEM=public_pem)
-    )
+    app = create_app(settings(AI_AUTH_MODE="jwt", AI_JWT_PUBLIC_KEY_PEM=public_pem))
 
     with TestClient(app) as client:
-        accepted = client.get(
-            "/v1/models", headers={"Authorization": f"Bearer {token}"}
-        )
-        rejected = client.get(
-            "/v1/models", headers={"Authorization": f"Bearer {token}tampered"}
-        )
+        accepted = client.get("/v1/models", headers={"Authorization": f"Bearer {token}"})
+        rejected = client.get("/v1/models", headers={"Authorization": f"Bearer {token}tampered"})
 
     assert accepted.status_code == 200
     assert rejected.status_code == 401

@@ -32,9 +32,7 @@ class Settings(BaseSettings):
 
     deepseek_api_key: SecretStr = Field(default=SecretStr(""), alias="DEEPSEEK_API_KEY")
     deepseek_base_url: str = Field(default="https://api.deepseek.com", alias="DEEPSEEK_BASE_URL")
-    allowed_models: str = Field(
-        default="deepseek-flash,deepseek-v4-pro", alias="AI_ALLOWED_MODELS"
-    )
+    allowed_models: str = Field(default="deepseek-flash,deepseek-v4-pro", alias="AI_ALLOWED_MODELS")
     default_model: str = Field(default="deepseek-flash", alias="AI_DEFAULT_MODEL")
     max_output_tokens: int = Field(default=32768, ge=1, le=393216, alias="AI_MAX_OUTPUT_TOKENS")
     max_request_bytes: int = Field(
@@ -60,6 +58,9 @@ class Settings(BaseSettings):
 
     quota_service_url: str = Field(default="", alias="AI_QUOTA_SERVICE_URL")
     quota_service_token: SecretStr = Field(default=SecretStr(""), alias="AI_QUOTA_SERVICE_TOKEN")
+    quota_timeout_seconds: float = Field(
+        default=15.0, gt=0, le=120, alias="AI_QUOTA_TIMEOUT_SECONDS"
+    )
 
     @field_validator("deepseek_base_url", "quota_service_url")
     @classmethod
