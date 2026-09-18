@@ -79,6 +79,8 @@ class ChatCompletionRequest(BaseModel):
 
 class TokenUsage(BaseModel):
     prompt_tokens: int = 0
+    prompt_cache_hit_tokens: int = 0
+    prompt_cache_miss_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
 
@@ -87,9 +89,17 @@ class TokenUsage(BaseModel):
         if not isinstance(value, dict):
             return cls()
         prompt = int(value.get("prompt_tokens") or 0)
+        cache_hit = int(value.get("prompt_cache_hit_tokens") or 0)
+        cache_miss = int(value.get("prompt_cache_miss_tokens") or 0)
         completion = int(value.get("completion_tokens") or 0)
         total = int(value.get("total_tokens") or prompt + completion)
-        return cls(prompt_tokens=prompt, completion_tokens=completion, total_tokens=total)
+        return cls(
+            prompt_tokens=prompt,
+            prompt_cache_hit_tokens=cache_hit,
+            prompt_cache_miss_tokens=cache_miss,
+            completion_tokens=completion,
+            total_tokens=total,
+        )
 
 
 class ErrorDetail(BaseModel):

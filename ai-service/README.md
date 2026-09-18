@@ -79,10 +79,14 @@ GenOffice 当前客户端会在基础地址后追加 `/chat/completions`，因�
 设置 `AI_QUOTA_SERVICE_URL` 和 `AI_QUOTA_SERVICE_TOKEN` 后，每次模型调用会使用以下内部接口：
 
 1. `POST /v1/internal/ai/reservations` 预留最大输出额度，成功返回 `{"reservation_id":"..."}`。
-2. `POST /v1/internal/ai/reservations/{id}/finalize` 按 DeepSeek 返回的真实 Token 用量结算。
+2. `POST /v1/internal/ai/reservations/{id}/finalize` 上报 DeepSeek 的输入、缓存命中、
+   缓存未命中和输出 Token，由 CloudBase 按成本加权额度结算。
 3. `POST /v1/internal/ai/reservations/{id}/release` 仅在尚未开始上游生成时释放预留额度。
 
 预留采用失败关闭策略：计费服务不可用时不调用模型，防止绕过余额限制。上游已开始但没有拿到最终用量时，仍调用 `finalize` 并携带失败原因；计费服务可按预留上限或产品规则结算，避免用户通过断开流来逃费。结算服务应通过 `request_id` 保证幂等，并定期回收长时间未结算的预留记录。
+
+DeepSeek 返回的 `prompt_cache_hit_tokens` 和 `prompt_cache_miss_tokens` 会原样传给
+额度服务；没有缓存明细的兼容模型，其全部输入按缓存未命中计算。
 
 ## Docker
 

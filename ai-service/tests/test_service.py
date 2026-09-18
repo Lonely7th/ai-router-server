@@ -75,7 +75,13 @@ def test_non_streaming_request_is_sanitized_and_forwarded() -> None:
                         "finish_reason": "stop",
                     }
                 ],
-                "usage": {"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11},
+                "usage": {
+                    "prompt_tokens": 9,
+                    "prompt_cache_hit_tokens": 6,
+                    "prompt_cache_miss_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 11,
+                },
             },
         )
 
@@ -175,7 +181,13 @@ def test_static_user_quota_reservation_and_settlement_contract() -> None:
                         "finish_reason": "stop",
                     }
                 ],
-                "usage": {"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11},
+                "usage": {
+                    "prompt_tokens": 9,
+                    "prompt_cache_hit_tokens": 6,
+                    "prompt_cache_miss_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 11,
+                },
             },
         )
 
@@ -209,6 +221,8 @@ def test_static_user_quota_reservation_and_settlement_contract() -> None:
     assert quota_calls[0]["body"]["user_id"] == "local-test-user"
     assert quota_calls[1]["body"]["usage"] == {
         "prompt_tokens": 9,
+        "prompt_cache_hit_tokens": 6,
+        "prompt_cache_miss_tokens": 3,
         "completion_tokens": 2,
         "total_tokens": 11,
     }
